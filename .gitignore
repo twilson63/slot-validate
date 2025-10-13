@@ -1,0 +1,6 @@
+*.log
+results/
+.DS_Store
+node_modules/
+*.tmp
+*.temp
