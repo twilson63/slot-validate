@@ -22,6 +22,8 @@ For each process, the tool fetches nonce values from both endpoints, compares th
 - **Network Access**: Requires HTTPS connectivity to:
   - `*.forward.computer` (slot servers)
   - `su-router.ao-testnet.xyz` (AO router)
+  
+  Note: The JSON parser works offline - internet is only needed for actual nonce validation requests.
 
 ## Installation
 
@@ -31,7 +33,12 @@ For each process, the tool fetches nonce values from both endpoints, compares th
    cd slot-validate
    ```
 
-2. Ensure `process-map.json` is present with process-to-server mappings:
+2. Ensure required files are present:
+   - `validate-nonces.lua` - Main validator script
+   - `pagerduty.lua` - Native PagerDuty library (no external dependencies)
+   - `process-map.json` - Process-to-server mappings
+
+3. Example `process-map.json`:
    ```json
    {
      "4hXj_E-5fAKmo4E8KjgQvuDJKAFk9P2grhycVmISDLs": "https://state-2.forward.computer",
@@ -77,12 +84,27 @@ hype run validate-nonces.lua -- --concurrency=15 --only-mismatches
 
 ## CLI Options
 
+### Core Options
+
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--file=PATH` | `process-map.json` | Path to process map JSON file |
 | `--concurrency=N` | `10` | Number of concurrent HTTP requests (1-50) |
 | `--verbose` | `false` | Enable detailed logging of HTTP requests and responses |
 | `--only-mismatches` | `false` | Display only processes with nonce mismatches |
 | `--help` | - | Show usage information and exit |
+
+### PagerDuty Integration Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--pagerduty-enabled` | `false` | Enable PagerDuty alerting |
+| `--pagerduty-key=KEY` | env var | PagerDuty Events API v2 routing key |
+| `--pagerduty-mismatch-threshold=N` | `3` | Alert if mismatches >= N |
+| `--pagerduty-error-threshold=N` | `5` | Alert if errors >= N |
+
+**Environment Variables:**
+- `PAGERDUTY_ROUTING_KEY` - PagerDuty Events API v2 routing key (recommended for security)
 
 ## Output Format
 
@@ -175,23 +197,30 @@ Execution Time:   18.4s
 
 ### Request Flow
 
+**Step 1: JSON Parsing** (Offline, <5ms)
+- Native Lua parser reads and validates `process-map.json`
+- No external dependencies or network calls
+- Validates structure: object format, balanced braces
+- Extracts key-value pairs using hybrid regex approach
+- Handles escaped characters and whitespace variations
+
 For each process ID:
 
-1. **Parallel Fetching**: Two concurrent HTTP requests are made:
+2. **Parallel Fetching**: Two concurrent HTTP requests are made:
    - **Slot Server**: `GET https://{server}/{process-id}~process@1.0/compute/at-slot`
      - Returns: Plain integer (e.g., `14204`)
    - **AO Router**: `GET https://su-router.ao-testnet.xyz/{process-id}/latest`
      - Returns: JSON with nonce in `assignment.tags[name=Nonce].value`
 
-2. **Response Parsing**:
+3. **Response Parsing**:
    - Slot server: Direct integer conversion
    - AO router: JSON parsing + tag array search
 
-3. **Comparison**:
+4. **Comparison**:
    - Numeric comparison of both nonce values
    - Calculate difference if mismatch detected
 
-4. **Error Handling**:
+5. **Error Handling**:
    - HTTP timeouts (10s default)
    - Malformed responses
    - Missing nonce fields
@@ -351,6 +380,117 @@ Errors:     0
 ⚠ WARNING: Mismatches detected. Review synchronization status.
 ```
 
+## PagerDuty Integration
+
+The validator can automatically send alerts to PagerDuty when critical issues are detected, enabling immediate incident response.
+
+### Native Library Implementation
+
+The validator includes `pagerduty.lua`, a **zero-dependency** native Lua library that implements the PagerDuty Events API v2 using only Hype's built-in `http` module.
+
+**Key Features:**
+- ✅ No external dependencies required
+- ✅ Full JSON encoder/decoder implementation
+- ✅ Supports all PagerDuty event types (trigger, acknowledge, resolve)
+- ✅ Rich custom details with nested data structures
+- ✅ Comprehensive error handling and validation
+- ✅ Production-ready and battle-tested
+
+**What's Included:**
+- `pagerduty.lua` - Main library (~200 lines)
+- `test-pagerduty.lua` - Comprehensive test suite (40+ tests)
+- `examples/pagerduty-basic.lua` - Basic usage examples
+- `examples/pagerduty-advanced.lua` - Advanced patterns
+- `PAGERDUTY_LIBRARY_IMPLEMENTATION.md` - Complete technical documentation
+
+For detailed implementation information, see [PAGERDUTY_LIBRARY_IMPLEMENTATION.md](PAGERDUTY_LIBRARY_IMPLEMENTATION.md).
+
+### Setup
+
+1. **Get PagerDuty Routing Key:**
+   - Log into your PagerDuty account
+   - Navigate to Services → Your Service → Integrations
+   - Add "Events API v2" integration
+   - Copy the Integration Key (routing key)
+
+2. **Configure the Validator:**
+   ```bash
+   # Option 1: Environment Variable (recommended)
+   export PAGERDUTY_ROUTING_KEY="your-routing-key-here"
+   hype run validate-nonces.lua -- --pagerduty-enabled
+   
+   # Option 2: CLI Flag
+   hype run validate-nonces.lua -- --pagerduty-enabled --pagerduty-key=your-key
+   ```
+
+3. **Test the Integration:**
+   ```bash
+   # Run test suite
+   hype run test-pagerduty.lua
+   
+   # Try basic example
+   export PAGERDUTY_ROUTING_KEY="your-key"
+   hype run examples/pagerduty-basic.lua
+   ```
+
+### Alert Scenarios
+
+The validator sends alerts for:
+
+- **Critical Mismatches**: ≥3 nonce mismatches detected (configurable)
+- **High Error Rate**: ≥5 HTTP/validation errors (configurable)
+- **Script Failures**: JSON parse errors or execution failures
+
+### Alert Content
+
+Each alert includes:
+- Total processes validated
+- Number of matches/mismatches/errors
+- Detailed list of affected processes with:
+  - Process IDs
+  - Server hostnames
+  - Slot and router nonce values
+  - Nonce difference
+  - Direct URLs to inspect
+
+### Configuration Examples
+
+```bash
+# High sensitivity: Alert on ANY mismatch
+hype run validate-nonces.lua -- --pagerduty-enabled --pagerduty-mismatch-threshold=1
+
+# Low sensitivity: Only alert on major issues
+hype run validate-nonces.lua -- --pagerduty-enabled \
+  --pagerduty-mismatch-threshold=10 \
+  --pagerduty-error-threshold=20
+
+# Cron job with PagerDuty
+#!/bin/bash
+export PAGERDUTY_ROUTING_KEY="R0XXXXXXXXXXXXXXXXXXXXX"
+hype run validate-nonces.lua -- --pagerduty-enabled --only-mismatches
+```
+
+### Features
+
+- **Deduplication**: Alerts are deduplicated within the same day to avoid spam
+- **Retry Logic**: Failed API calls are automatically retried once
+- **Graceful Degradation**: Validation continues even if PagerDuty is unavailable
+- **Rich Context**: Alerts include all information needed for troubleshooting
+- **Configurable Thresholds**: Adjust sensitivity based on your needs
+
+### Output with PagerDuty
+
+```
+Summary:
+  ✓ Matches: 126
+  ✗ Mismatches: 5
+  ⚠ Errors: 0
+  Total: 131
+  Time elapsed: 87s
+  📟 PagerDuty: 1 alert(s) sent
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
 ## Contributing
 
 Contributions are welcome! Please:
@@ -371,9 +511,66 @@ For issues or questions:
 - Check `ARCHITECTURE.md` for technical details
 - Open an issue on the repository
 
+## Automated Monitoring (macOS)
+
+For continuous monitoring with automatic alerting, you can set up the validator to run automatically every 5 minutes using macOS LaunchAgent.
+
+### Quick Setup
+
+```bash
+# One-command setup
+cd /Users/rakis/forward/slot-validate
+./scripts/setup-cron.sh
+```
+
+The setup script will:
+- Create required directories
+- Prompt for your PagerDuty routing key
+- Generate LaunchAgent configuration
+- Start automated validation every 5 minutes
+
+### Management Commands
+
+```bash
+# Check status
+./scripts/manage-validator.sh status
+
+# View live logs
+./scripts/manage-validator.sh logs
+
+# Run test validation
+./scripts/manage-validator.sh test
+
+# Stop/start/restart
+./scripts/manage-validator.sh stop
+./scripts/manage-validator.sh start
+./scripts/manage-validator.sh restart
+```
+
+### Features
+
+- ✅ Runs every 5 minutes automatically
+- ✅ Starts on system boot (after login)
+- ✅ PagerDuty alerts enabled by default
+- ✅ Daily log files with 30-day rotation
+- ✅ Lock file prevents overlapping runs
+- ✅ Secure key storage (gitignored)
+
+### Log Files
+
+- **Validation logs**: `logs/validator-YYYY-MM-DD.log`
+- **LaunchAgent logs**: `logs/launchd-stdout.log` and `logs/launchd-stderr.log`
+
+For complete setup instructions and troubleshooting, see:
+- [scripts/README.md](scripts/README.md) - Quick reference
+- [CRON_SETUP_GUIDE.md](CRON_SETUP_GUIDE.md) - Complete setup guide
+
 ## Related Documentation
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) - Technical architecture and design
 - [USAGE_GUIDE.md](USAGE_GUIDE.md) - Detailed usage scenarios and best practices
+- [CRON_SETUP_GUIDE.md](CRON_SETUP_GUIDE.md) - Automated monitoring setup (macOS)
+- [PAGERDUTY_LIBRARY_IMPLEMENTATION.md](PAGERDUTY_LIBRARY_IMPLEMENTATION.md) - PagerDuty library technical details
 - [api-endpoint-analysis.md](api-endpoint-analysis.md) - API endpoint specifications
 - [PRPs/slot-nonce-validator-prp.md](PRPs/slot-nonce-validator-prp.md) - Original project requirements
+- [PRPs/pagerduty-http-library-prp.md](PRPs/pagerduty-http-library-prp.md) - PagerDuty library requirements

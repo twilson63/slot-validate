@@ -4,3 +4,6 @@ results/
 node_modules/
 *.tmp
 *.temp
+
+config/.pagerduty_key
+logs/*.lock
