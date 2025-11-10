@@ -1,4 +1,5 @@
 local http = require("http")
+local fs = require("fs")
 
 local GREEN = "\27[32m"
 local RED = "\27[31m"
@@ -10,13 +11,15 @@ local config = {
   concurrency = 10,
   verbose = false,
   only_mismatches = false,
-  max_retries = 3,
-  base_retry_delay = 1,
+  max_retries = 1,
+  base_retry_delay = 0.5,
   file = "process-map.json",
   pagerduty_enabled = false,
-  pagerduty_routing_key = os.getenv("PAGERDUTY_ROUTING_KEY") or nil,
+  pagerduty_routing_key = (env and env.PAGERDUTY_ROUTING_KEY) or nil,
   pagerduty_mismatch_threshold = 3,
-  pagerduty_error_threshold = 5
+  pagerduty_error_threshold = 5,
+  request_timeout = 5000,
+  exclude_servers = {}
 }
 
 local function print_help()
@@ -28,6 +31,7 @@ Options:
   --concurrency=N                  Number of concurrent requests (default: 10)
   --verbose                        Show detailed information for each process
   --only-mismatches                Only show processes with mismatched nonces
+  --exclude-server=HOST            Exclude server (can be used multiple times)
   
   PagerDuty Options:
   --pagerduty-enabled              Enable PagerDuty alerting (default: false)
@@ -42,6 +46,8 @@ Environment Variables:
 Examples:
   hype run validate-nonces.lua -- --concurrency=20 --verbose
   hype run validate-nonces.lua -- --file=test-process-map.json
+  hype run validate-nonces.lua -- --exclude-server=state-2.forward.computer
+  hype run validate-nonces.lua -- --exclude-server=server1.com --exclude-server=server2.com
   
   # Enable PagerDuty with env var
   export PAGERDUTY_ROUTING_KEY="<your-key>"
@@ -50,7 +56,7 @@ Examples:
   # Enable with CLI key
   hype run validate-nonces.lua -- --pagerduty-enabled --pagerduty-key=<key>
 ]])
-  os.exit(0)
+  return
 end
 
 local function parse_args()
@@ -70,7 +76,7 @@ local function parse_args()
         config.concurrency = tonumber(val)
       else
         print(RED .. "Error: Invalid concurrency value" .. RESET)
-        os.exit(1)
+        return
       end
     elseif a:match("^%-%-file=") then
       local val = a:match("^%-%-file=(.+)$")
@@ -78,7 +84,12 @@ local function parse_args()
         config.file = val
       else
         print(RED .. "Error: Invalid file path" .. RESET)
-        os.exit(1)
+        return
+      end
+    elseif a:match("^%-%-exclude%-server=") then
+      local val = a:match("^%-%-exclude%-server=(.+)$")
+      if val then
+        table.insert(config.exclude_servers, val)
       end
     elseif a:match("^%-%-pagerduty%-key=") then
       config.pagerduty_routing_key = a:match("^%-%-pagerduty%-key=(.+)$")
@@ -97,12 +108,13 @@ local function parse_args()
 end
 
 local function load_process_map()
-  local file = io.open(config.file, "r")
-  if not file then
-    return nil, "Could not open " .. config.file
+  local ok, content = pcall(function()
+    return fs.readFileSync(config.file)
+  end)
+  
+  if not ok then
+    return nil, "Could not open " .. config.file .. ": " .. tostring(content)
   end
-  local content = file:read("*all")
-  file:close()
   
   local trimmed = content:match("^%s*(.-)%s*$")
   if not trimmed or trimmed == "" then
@@ -156,8 +168,14 @@ end
 
 local function fetch_with_retry(url, max_retries)
   for attempt = 1, max_retries do
-    local resp, err = http.get(url)
-    if resp and resp.status == 200 then
+    local ok, resp = pcall(function()
+      return http.fetch(url, {
+        method = "GET",
+        timeout = config.request_timeout
+      })
+    end)
+    
+    if ok and resp.status == 200 then
       return resp, nil
     end
     
@@ -165,14 +183,25 @@ local function fetch_with_retry(url, max_retries)
       local delay = config.base_retry_delay * (2 ^ (attempt - 1))
       sleep(delay)
     else
-      return nil, err or ("HTTP " .. tostring(resp and resp.status or "error"))
+      if ok then
+        return nil, "HTTP " .. tostring(resp.status) .. ": " .. (resp.statusText or "error")
+      else
+        return nil, tostring(resp)
+      end
     end
   end
   return nil, "Max retries exceeded"
 end
 
 local function extract_router_nonce(resp)
-  local data = resp.json()
+  local ok, data = pcall(function()
+    return resp:json()
+  end)
+  
+  if not ok then
+    return nil, "Failed to parse JSON response: " .. tostring(data)
+  end
+  
   if not data or not data.assignment or not data.assignment.tags then
     return nil, "Invalid router response structure"
   end
@@ -214,7 +243,7 @@ local function validate_process(entry)
     return result
   end
   
-  local slot_nonce = slot_resp.body:match("^%s*(.-)%s*$")
+  local slot_nonce = slot_resp:text():match("^%s*(.-)%s*$")
   local router_nonce, extract_err = extract_router_nonce(router_resp)
   
   if extract_err then
@@ -242,13 +271,13 @@ local function process_concurrent(items, worker_fn, max_concurrent)
     results[idx] = result
     
     if idx % 10 == 0 or idx == #items then
-      io.write(string.format("\r%sProcessed %d/%d...%s", BLUE, idx, #items, RESET))
-      io.flush()
+      -- Progress indicator (io.write not available in hype-rs)
+      print(string.format("%sProcessed %d/%d...%s", BLUE, idx, #items, RESET))
     end
   end
   
-  io.write("\r" .. string.rep(" ", 50) .. "\r")
-  io.flush()
+  -- Clear progress line (io.write not available in hype-rs)
+  print("")
   
   return results
 end
@@ -312,8 +341,8 @@ function AlertManager.new(cfg)
   
   if cfg.pagerduty_enabled then
     if not cfg.pagerduty_routing_key or cfg.pagerduty_routing_key == "" then
-      io.stderr:write("Warning: PagerDuty enabled but no routing key provided\n")
-      io.stderr:write("Set PAGERDUTY_ROUTING_KEY env var or use --pagerduty-key flag\n")
+      print("Warning: PagerDuty enabled but no routing key provided")
+      print("Set PAGERDUTY_ROUTING_KEY env var or use --pagerduty-key flag")
       return self
     end
     
@@ -331,10 +360,10 @@ function AlertManager.new(cfg)
           print(string.format("%s[PagerDuty]%s Initialized with routing key", BLUE, RESET))
         end
       else
-        io.stderr:write(string.format("Warning: PagerDuty initialization failed: %s\n", tostring(pd_or_err)))
+        print(string.format("Warning: PagerDuty initialization failed: %s", tostring(pd_or_err)))
       end
     else
-      io.stderr:write("Warning: PagerDuty library not found (pagerduty.lua)\n")
+      print("Warning: PagerDuty library not found (pagerduty.lua)")
     end
   end
   
@@ -393,7 +422,7 @@ function AlertManager:send_alert(severity, summary, details)
     end
   end
   
-  io.stderr:write(string.format("PagerDuty alert failed: %s\n", tostring(err)))
+  print(string.format("PagerDuty alert failed: %s", tostring(err)))
   return false
 end
 
@@ -474,16 +503,34 @@ local function main()
     end
     
     local processes = {}
+    local excluded_count = 0
     for process_id, target in pairs(process_map) do
-      table.insert(processes, {
-        process_id = process_id,
-        target = target:gsub("^https?://", "")
-      })
+      local clean_target = target:gsub("^https?://", "")
+      local excluded = false
+      
+      for _, exclude in ipairs(config.exclude_servers) do
+        if clean_target:find(exclude, 1, true) then
+          excluded = true
+          excluded_count = excluded_count + 1
+          break
+        end
+      end
+      
+      if not excluded then
+        table.insert(processes, {
+          process_id = process_id,
+          target = clean_target
+        })
+      end
+    end
+    
+    if excluded_count > 0 then
+      print(string.format("%sExcluded %d processes from filtered servers%s", YELLOW, excluded_count, RESET))
     end
     
     if #processes == 0 then
       print(YELLOW .. "No processes found in process-map.json" .. RESET)
-      os.exit(0)
+      return
     end
     
     print(string.format("%sValidating %d processes with concurrency %d...%s\n", BLUE, #processes, config.concurrency, RESET))
@@ -545,13 +592,13 @@ local function main()
     print(string.format("%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s", BLUE, RESET))
     
     if mismatches > 0 then
-      os.exit(1)
+      return
     end
   end)
   
   if not ok then
     print(RED .. "Fatal error: " .. tostring(main_err) .. RESET)
-    os.exit(1)
+    return
   end
 end
 

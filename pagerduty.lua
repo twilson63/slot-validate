@@ -188,25 +188,31 @@ function PagerDuty:event(event_data)
   end
   local body = body_or_err
   
-  local resp, http_err = http.post(self.endpoint, body, {
-    ["Content-Type"] = "application/json"
-  })
+  local http_ok, resp = pcall(function()
+    return http.fetch(self.endpoint, {
+      method = "POST",
+      body = body,
+      headers = {
+        ["Content-Type"] = "application/json"
+      }
+    })
+  end)
   
-  if not resp then
-    return false, "HTTP error: " .. tostring(http_err)
+  if not http_ok then
+    return false, "HTTP error: " .. tostring(resp)
   end
   
   if resp.status == 202 then
     return true, nil
   elseif resp.status == 400 then
-    local data, _ = json_decode_response(resp.body)
+    local data, _ = json_decode_response(resp:text())
     return false, "Bad request: " .. (data and data.message or "Invalid event")
   elseif resp.status == 429 then
     return false, "Rate limited: Too many requests"
   elseif resp.status >= 500 then
     return false, "Server error: HTTP " .. resp.status
   else
-    return false, "HTTP " .. resp.status .. ": " .. (resp.body or "Unknown error")
+    return false, "HTTP " .. resp.status .. ": " .. (resp:text() or "Unknown error")
   end
 end
 

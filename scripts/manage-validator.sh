@@ -61,10 +61,15 @@ case "$1" in
       fi
       
       echo ""
-      echo "📝 Recent activity (last 10 runs):"
+      echo "📊 Last Summary:"
       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
       if [ -f "$LOG_FILE" ]; then
-        grep "Starting validation\|Validation complete" "$LOG_FILE" | tail -20
+        # Extract last summary (matches, mismatches, errors, total, time, pagerduty)
+        tail -200 "$LOG_FILE" | grep -A 6 "Summary:" | tail -7 | sed 's/\[34m//g; s/\[32m//g; s/\[31m//g; s/\[33m//g; s/\[0m//g'
+        echo ""
+        echo "📝 Recent activity (last 5 runs):"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        grep "Starting validation\|Validation complete" "$LOG_FILE" | tail -10
       else
         echo "   No logs for today yet"
       fi
