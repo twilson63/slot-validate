@@ -7,3 +7,8 @@ node_modules/
 
 config/.pagerduty_key
 logs/*.lock
+template.md
+opencode.json
+PRPs
+hype-rs-build
+var
