@@ -6,10 +6,8 @@ High-performance CLI tool for validating nonce consistency between AO slot serve
 
 ```bash
 # 1. Install Hype runtime
-curl -fsSL https://hype.forward.computer/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/twilson63/hype-rs/master/install.sh | sh
 
-# 2. Clone and run
-git clone <repository-url>
 cd slot-validate
 hype run validate-nonces.lua
 ```
@@ -91,20 +89,6 @@ slot-validate/
 ├── scripts/               # Automation scripts
 ├── examples/              # Usage examples
 ├── docs/                  # Detailed documentation
-└── hype-rs-build/         # Core Rust engine
-```
-
-## Development
-
-```bash
-# Build hype-rs engine
-cd hype-rs-build && cargo build --release
-
-# Run tests
-cargo test
-
-# Lint
-cargo clippy -- -D warnings
 ```
 
 ## License
